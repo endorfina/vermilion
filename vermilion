@@ -132,6 +132,9 @@ case "$VERMILION_TARGET" in
     mark)
         test -f $VERMILION_FILE_LAST_SUCCESS && rm $VERMILION_FILE_LAST_SUCCESS
         ;;
+    *)
+        usage && exit 1
+        ;;
 esac
 
 
