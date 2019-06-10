@@ -10,7 +10,7 @@ $PROGNAME <cmd>
 _EOF
 }
 
-[ $# -eq 0 ] && usage && exit 1
+test $# -eq 0 && usage && exit 1
 
 readonly VERMILION_FILE_LIST="${HOME}/.config/vermilion_list"
 readonly VERMILION_FILE_LAST_SUCCESS=".vermilion_last_success"
@@ -88,6 +88,10 @@ upgrade() {
             ;;
         git)
             exit 0 # do nothing, only fetch updates
+            ;;
+        *)
+            echo "[${DIR}] unknown option ${CMD}"
+            exit 1
             ;;
     esac
 
