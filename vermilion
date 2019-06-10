@@ -1,0 +1,133 @@
+#!/bin/bash
+
+readonly PROGNAME="${0##*/}"
+
+#TODO: help
+usage() {
+    cat << _EOF
+$PROGNAME <cmd>
+
+_EOF
+}
+
+[ $# -eq 0 ] && usage && exit 1
+
+readonly VERMILLION_FILE_LIST="${HOME}/.config/vermillion_list"
+readonly VERMILLION_FILE_LAST_SUCCESS=".vermillion_last_success"
+readonly VERMILLION_CFLAGS="-march=native -O2 -pipe"
+readonly VERMILLION_CXXFLAGS="-march=native -O3"
+readonly VERMILLION_TARGET="$1"
+shift
+
+# Try using chroot-git then git from the host system
+if command -v chroot-git &>/dev/null; then
+	VERMILLION_GIT_CMD=$(command -v chroot-git)
+elif command -v git &>/dev/null; then
+	VERMILLION_GIT_CMD=$(command -v git)
+else
+    echo "neither chroot-git or git are available in your system!"
+    exit 1
+fi
+
+readonly VERMILLION_GIT_CMD
+
+get_dir() {
+    readonly local RE="^~/(.+)"
+    [[ "$1" =~ $RE ]] && \
+        echo -n "${HOME}/${BASH_REMATCH[1]}" || \
+        echo -n "$1"
+}
+
+prepare() {
+    local DIR=$(get_dir "$1")
+    local BASENAME=$(basename $DIR)
+    local ORIGIN="$2"
+
+    if test ! -d $DIR && cd $(dirname "$DIR"); then
+        $VERMILLION_GIT_CMD clone --recurse-submodules $ORIGIN $BASENAME &>/dev/null && \
+        echo "Fetching $BASENAME: complete"
+    fi
+
+    cd $DIR || (echo "Can't build $DIR" 1>&2; exit 1)
+}
+
+upgrade() {
+    local DIR=$(get_dir "$1")
+    local ORIGIN="$2"
+    local CMD="$3"
+
+    cd $DIR || (echo "Can't find $DIR" 1>&2; exit 1)
+    if test -d .git && $VERMILLION_GIT_CMD fetch &> /dev/null; then
+        $VERMILLION_GIT_CMD pull -q
+    else
+        echo "Cannot git fetch $DIR"
+        exit 1
+    fi
+    local HEAD_POS=$($VERMILLION_GIT_CMD rev-parse HEAD)
+    test -f "$VERMILLION_FILE_LAST_SUCCESS" && [[ "$(cat "$VERMILLION_FILE_LAST_SUCCESS")" == "$HEAD_POS" ]] && exit 0
+
+    shift 3
+    case "$CMD" in
+        script)
+            if test $# -gt 0
+            then
+                "$@"
+            fi
+            ;;
+        cmake)
+            local BUILD_DIR=".vermillion_cmake_build_files"
+            local SRC_DIR="$1"
+            shift
+            if test ! -f "${BUILD_DIR}/CMakeCache.txt"; then
+                cmake -B "${BUILD_DIR}" -S "${SRC_DIR}" -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$VERMILLION_CFLAGS" -DCMAKE_CXX_FLAGS="$VERMILLION_CXXFLAGS" || (rm -rf "${BUILD_DIR}"; exit 1)
+            fi
+            cmake --build "${BUILD_DIR}" "$@"
+            ;;
+        make)
+            # TODO
+            ;;
+        git)
+            exit 0 # do nothing, only fetch updates
+            ;;
+    esac
+
+    test $? -eq 0 && \
+        echo -n "$HEAD_POS" > $VERMILLION_FILE_LAST_SUCCESS || \
+        echo "[${DIR}] failed to upgrade."
+}
+
+func_main() {
+    echo "Running [$1]..."
+    while read -r line || [[ -n "$line" ]]
+    do
+        # fork in order to keep our pipes clean
+        "$1" ${line} &
+        wait
+    done
+}
+
+case "$VERMILLION_TARGET" in
+    help)
+        usage && exit 0
+        ;;
+    add)
+        readonly RE="^(${HOME})/(.+)"
+        FILENAME=$(pwd)
+        [[ "$FILENAME" =~ $RE ]] && \
+            FILENAME="~/${BASH_REMATCH[2]}"
+        rm "${VERMILLION_FILE_LIST}.old" &>/dev/null
+        cp "$VERMILLION_FILE_LIST" "${VERMILLION_FILE_LIST}.old" &>/dev/null
+        echo "$FILENAME" "$($VERMILLION_GIT_CMD config --get remote.origin.url)" "$@" | cat "${VERMILLION_FILE_LIST}.old" - 2>/dev/null | sort -u --key=1,1 > $VERMILLION_FILE_LIST
+        ;;
+    up)
+        func_main upgrade < $VERMILLION_FILE_LIST
+        ;;
+    prep)
+        func_main prepare < $VERMILLION_FILE_LIST
+        ;;
+    mark)
+        test -f $VERMILLION_FILE_LAST_SUCCESS && rm $VERMILLION_FILE_LAST_SUCCESS
+        ;;
+esac
+
+
