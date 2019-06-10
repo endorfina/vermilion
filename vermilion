@@ -13,6 +13,7 @@ _EOF
 test $# -eq 0 && usage && exit 1
 
 readonly VERMILION_FILE_LIST="${HOME}/.config/vermilion_list"
+readonly VERMILION_FILE_LIST_TMP="/tmp/vermilion_list.$(whoami)"
 readonly VERMILION_FILE_LAST_SUCCESS=".vermilion_last_success"
 readonly VERMILION_CFLAGS="-march=native -O2 -pipe"
 readonly VERMILION_CXXFLAGS="-march=native -O3"
@@ -32,10 +33,19 @@ fi
 readonly VERMILION_GIT_CMD
 
 get_dir() {
-    readonly local RE="^~/(.+)"
-    [[ "$1" =~ $RE ]] && \
+    readonly local RE="^\^/(.+)"
+    local escaped=$(echo "$1" | sed "s/%SPACE%/ /g")
+    [[ "$escaped" =~ $RE ]] && \
         echo -n "${HOME}/${BASH_REMATCH[1]}" || \
-        echo -n "$1"
+        echo -n "$escaped"
+}
+
+get_dir_current() {
+    local readonly RE="^(${HOME})/(.+)"
+    local FILENAME=$(pwd | sed "s/ /%SPACE%/g")
+    [[ "$FILENAME" =~ $RE ]] && \
+        echo "^/${BASH_REMATCH[2]}" || \
+        echo "$FILENAME"
 }
 
 prepare() {
@@ -51,10 +61,50 @@ prepare() {
     cd $DIR || (echo "Can't build $DIR" 1>&2; exit 1)
 }
 
+run_make() {
+    local MAK_TARGET=
+    while test $# -gt 0; do
+        local VERCMD="$1"
+        shift
+        case "$VERCMD" in
+            cxxflags)
+                export "$1"="$VERMILION_CXXFLAGS"
+                shift
+                ;;
+            cflags)
+                export "$1"="$VERMILION_CFLAGS"
+                shift
+                ;;
+            target)
+                MAK_TARGET="$1"
+                shift
+                ;;
+        esac
+    done
+    test -n "$MAK_TARGET" && \
+        make "$MAK_TARGET" || \
+        make
+}
+
 upgrade() {
-    local DIR=$(get_dir "$1")
-    local ORIGIN="$2"
-    local CMD="$3"
+    readonly local DIR=$(get_dir "$1")
+    readonly local ORIGIN="$2"
+    shift 2
+
+    local POST_BUILD=()
+
+    if [[ "$1" == "post" ]]; then
+        shift
+        readonly local HOME_ESCAPED=$(echo "${HOME}" | sed "s:\\/:\\\\/:g")
+        while test $# -gt 0 && test "$1" != "postend"; do
+            POST_BUILD+=("$(echo "$1" | sed "s:^\\^\\/:${HOME_ESCAPED}\\/:")")
+            shift
+        done
+        shift
+    fi
+
+    local VERCMD="$1"
+    shift
 
     cd $DIR || (echo "Can't find $DIR" 1>&2; exit 1)
     if test -d .git && $VERMILION_GIT_CMD fetch &> /dev/null; then
@@ -66,8 +116,7 @@ upgrade() {
     local HEAD_POS=$($VERMILION_GIT_CMD rev-parse HEAD)
     test -f "$VERMILION_FILE_LAST_SUCCESS" && [[ "$(cat "$VERMILION_FILE_LAST_SUCCESS")" == "$HEAD_POS" ]] && exit 0
 
-    shift 3
-    case "$CMD" in
+    case "$VERCMD" in
         script)
             if test $# -gt 0
             then
@@ -84,7 +133,7 @@ upgrade() {
             cmake --build "${BUILD_DIR}" "$@"
             ;;
         make)
-            # TODO
+            run_make "$@"
             ;;
         git)
             exit 0 # do nothing, only fetch updates
@@ -95,9 +144,53 @@ upgrade() {
             ;;
     esac
 
-    test $? -eq 0 && \
-        echo -n "$HEAD_POS" > $VERMILION_FILE_LAST_SUCCESS || \
+    if test $? -eq 0
+    then
+        if test "${#POST_BUILD[@]}" -gt 0; then
+            echo "${POST_BUILD[*]}" | bash
+        fi
+        echo -n "$HEAD_POS" > $VERMILION_FILE_LAST_SUCCESS
+    else
         echo "[${DIR}] failed to upgrade."
+    fi
+}
+
+run_depcheck() {
+    local readonly AVAILABLE_LIBS=$(ldconfig -p | sed "s/\\s\+\([^ ]\+\)\\.so.*$/\1/;/^[^lib]/d" | sort -u)
+    while read -r line || [[ -n "$line" ]]; do
+        echo -n "$line" | awk '{print "[", $1, "] requires:"}'
+
+        for dependency in $(echo -n "$line" | sed "s/^.* dep \(.\+\) depend.*\$/\\1/"); do
+            echo -n " > $dependency, "
+            local FOUND=$(echo "$AVAILABLE_LIBS" | grep "$dependency")
+            if test -n "$FOUND"; then
+                echo "found regex in:"
+                for foundlib in $FOUND; do
+                    echo "     - $foundlib"
+                done
+            else
+                echo "not found!"
+            fi
+        done
+    done
+}
+
+add_after_origin() {
+    if test $# -gt 0
+    then
+        local DIR="$1"
+        local ORIGIN="$2"
+        shift 2
+        echo "$DIR" "$ORIGIN" "$(cat)" "$@"
+    fi
+}
+
+add_dependency() {
+    local RE="^(.*) dep (.+) depend (.*)\$"
+    if [[ "$(cat)" =~ $RE ]]
+    then
+        echo "${BASH_REMATCH[1]} dep ${BASH_REMATCH[2]} $* depend ${BASH_REMATCH[3]}"
+    fi
 }
 
 func_main() {
@@ -110,31 +203,55 @@ func_main() {
     done
 }
 
+readonly BASIC_ACCESS_SED="s/^\\s*#.*//;/^\\s*\$/d"
+
 case "$VERMILION_TARGET" in
     help)
         usage && exit 0
         ;;
     add)
-        readonly RE="^(${HOME})/(.+)"
-        FILENAME=$(pwd)
-        [[ "$FILENAME" =~ $RE ]] && \
-            FILENAME="~/${BASH_REMATCH[2]}"
-        rm "${VERMILION_FILE_LIST}.old" &>/dev/null
-        cp "$VERMILION_FILE_LIST" "${VERMILION_FILE_LIST}.old" &>/dev/null
-        echo "$FILENAME" "$($VERMILION_GIT_CMD config --get remote.origin.url)" "$@" | cat "${VERMILION_FILE_LIST}.old" - 2>/dev/null | sort -u --key=1,1 > $VERMILION_FILE_LIST
-        ;;
-    up)
-        func_main upgrade < $VERMILION_FILE_LIST
-        ;;
-    prep)
-        func_main prepare < $VERMILION_FILE_LIST
+        CURRENT_DIR=$(get_dir_current)
+        sed "/^$(echo "$CURRENT_DIR" | sed "s/[]\/\$*.^[]/\\\&/g")/d" \
+            "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
+        echo "$CURRENT_DIR" "$($VERMILION_GIT_CMD config --get remote.origin.url)" "$@" | \
+            cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
+        rm "$VERMILION_FILE_LIST_TMP"
         ;;
     mark)
         test -f $VERMILION_FILE_LAST_SUCCESS && rm $VERMILION_FILE_LAST_SUCCESS
+        ;;
+    check)
+        sed "${BASIC_ACCESS_SED};/ dep /!d" "$VERMILION_FILE_LIST" | run_depcheck
+        ;;
+    dep)
+        sed "$BASIC_ACCESS_SED;/^$(get_dir_current | sed "s/[]\/\$*.^[]/\\\&/g")/d" \
+            "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
+        sed "$BASIC_ACCESS_SED;/^$(get_dir_current | sed "s/[]\/\$*.^[]/\\\&/g")/!d" "$VERMILION_FILE_LIST_TMP" | \
+            add_dependency "$@" | \
+            cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
+        ;;
+    post*)
+        CURRENT_DIR=$(get_dir_current)
+        ESCAPED_NAME=$(echo "$CURRENT_DIR" | sed "s/[]\/\$*.^[]/\\\&/g")
+
+        sed "$BASIC_ACCESS_SED;/^${ESCAPED_NAME}/d" \
+            "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
+        cp "$VERMILION_FILE_LIST" "${VERMILION_FILE_LIST_TMP}2"
+        echo "post" "$@" "postend" | \
+            add_after_origin $(sed "$BASIC_ACCESS_SED;s/ post .* postend / /;/^${ESCAPED_NAME}/!d" "${VERMILION_FILE_LIST_TMP}2") | \
+            cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
+        rm "$VERMILION_FILE_LIST_TMP" "${VERMILION_FILE_LIST_TMP}2"
+        ;;
+    up*)
+        sed "$BASIC_ACCESS_SED;s/ dep .* depend / /" "$VERMILION_FILE_LIST" | func_main upgrade
+        ;;
+    prep*)
+        sed "$BASIC_ACCESS_SED;s/ dep .* depend / /" "$VERMILION_FILE_LIST" | func_main prepare
         ;;
     *)
         usage && exit 1
         ;;
 esac
 
+exit 0
 
