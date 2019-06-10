@@ -2,10 +2,33 @@
 
 readonly PROGNAME="${0##*/}"
 
-#TODO: help
 usage() {
     cat << _EOF
-$PROGNAME <cmd>
+$PROGNAME <cmd> [OPTIONS] ...
+
+Available commands:
+    add examples:
+        $PROGNAME add git - will keep a repo up to date and nothing else.
+        $PROGNAME add cmake - will run cmake and build upon new git pull.
+        $PROGNAME add make target all - will run make upon new git pull.
+
+    mark:
+        Marks the current repo for a rebuild upon a subsequent upgrade call.
+
+    post, postbuild:
+        Will run specified commands upon successful git pull AND build.
+        ex. $PROGNAME postbuild cp a.out ^/.local/bin/
+        Note: ^/ is equivalent to \$HOME. It helps with portability.
+
+    up, upgrade:
+        Runs git fetch on everything and builds if new.
+
+    prep, prepare:
+        Checks if all repos actually exist and runs git clone if one doesn't.
+        The parent directory must still be present.
+
+Feel free to ask and/or contribute on github! :)
+https://github.com/endorfina/vermilion
 
 _EOF
 }
