@@ -189,26 +189,6 @@ upgrade() {
     fi
 }
 
-run_depcheck() {
-    local readonly AVAILABLE_LIBS=$(ldconfig -p | sed "s/\\s\+\([^ ]\+\)\\.so.*$/\1/;/^[^lib]/d" | sort -u)
-    while read -r line || [[ -n "$line" ]]; do
-        echo -n "$line" | awk '{print "[", $1, "] requires:"}'
-
-        for dependency in $(echo -n "$line" | sed "s/^.* $TAG_DEP_BEGIN_ESC \(.\+\) ${TAG_DEP_END_ESC}.*\$/\\1/"); do
-            echo -n " > $dependency, "
-            local FOUND=$(echo "$AVAILABLE_LIBS" | grep "$dependency")
-            if test -n "$FOUND"; then
-                echo "found regex in:"
-                for foundlib in $FOUND; do
-                    echo "     - $foundlib"
-                done
-            else
-                echo "not found!"
-            fi
-        done
-    done
-}
-
 add_after_origin() {
     if test $# -gt 0
     then
@@ -216,14 +196,6 @@ add_after_origin() {
         local ORIGIN="$2"
         shift 2
         echo "$DIR" "$ORIGIN" "$(cat)" "$@"
-    fi
-}
-
-add_dependency() {
-    local RE="^(.*) dep (.+) depend (.*)\$"
-    if [[ "$(cat)" =~ $RE ]]
-    then
-        echo "${BASH_REMATCH[1]} dep ${BASH_REMATCH[2]} $* depend ${BASH_REMATCH[3]}"
     fi
 }
 
@@ -240,7 +212,7 @@ func_main() {
     done
     wait
 
-    for output in $OUTPUTS
+    for output in "${OUTPUTS[@]}"
     do
         [[ -n $output ]] && \
             echo "$output"
@@ -262,17 +234,7 @@ case "$VERMILION_TARGET" in
     mark)
         test -f $VERMILION_FILE_LAST_SUCCESS && rm $VERMILION_FILE_LAST_SUCCESS
         ;;
-    check)
-        sed "${BASIC_ACCESS_SED};/ $TAG_DEP_BEGIN_ESC /!d" "$VERMILION_FILE_LIST" | run_depcheck
-        ;;
-    dep)
-        sed "$BASIC_ACCESS_SED;/^$(get_dir_current | sed "s/[]\/\$*.^[]/\\\&/g")/d" \
-            "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
-        sed "$BASIC_ACCESS_SED;/^$(get_dir_current | sed "s/[]\/\$*.^[]/\\\&/g")/!d" "$VERMILION_FILE_LIST_TMP" | \
-            add_dependency "$@" | \
-            cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
-        ;;
-    post*)
+    post|postbuild)
         CURRENT_DIR=$(get_dir_current)
         ESCAPED_NAME=$(echo "$CURRENT_DIR" | sed "s/[]\/\$*.^[]/\\\&/g")
 
@@ -284,13 +246,13 @@ case "$VERMILION_TARGET" in
             cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
         rm "$VERMILION_FILE_LIST_TMP" "${VERMILION_FILE_LIST_TMP}2"
         ;;
-    up*)
+    up|upgrade|update)
         sed "$BASIC_ACCESS_SED;s/ $TAG_DEP_BEGIN_ESC .* $TAG_DEP_END_ESC / /" "$VERMILION_FILE_LIST" | func_main upgrade
         ;;
-    prep*)
+    prep|prepare)
         sed "$BASIC_ACCESS_SED;s/ $TAG_DEP_BEGIN_ESC .* $TAG_DEP_END_ESC / /" "$VERMILION_FILE_LIST" | func_main prepare
         ;;
-    st*)
+    st|status)
         sed "$BASIC_ACCESS_SED;s/^\([^ ]\+\).*/\\1/" "$VERMILION_FILE_LIST"
         ;;
     *)
