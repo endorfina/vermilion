@@ -14,7 +14,7 @@ $ vermilion add git
 $ vermilion upgrade
 ```
 
-vermilion keeps a record of stuff the user has added in `~/.config/vermilion_list`.
+vermilion keeps a record of stuff the user has added in `~/.config/vermilion_record`.
 The main idea is that should we ever want to wipe the drive clean, we require only to copy this list file and run `vermilion prepare` on the new system in order to fetch all repos at once.
 
 CMake builds automatically receive the `-march=native` flag, among others.

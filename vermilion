@@ -35,13 +35,24 @@ _EOF
 
 test $# -eq 0 && usage && exit 1
 
-readonly VERMILION_FILE_LIST="${HOME}/.config/vermilion_list"
-readonly VERMILION_FILE_LIST_TMP="/tmp/vermilion_list.$(whoami)"
+readonly VERMILION_FILE_LIST_FILENAME="vermilion_record"
+readonly VERMILION_FILE_LIST="${HOME}/.config/$VERMILION_FILE_LIST_FILENAME"
+readonly VERMILION_FILE_LIST_TMP="/tmp/${VERMILION_FILE_LIST_FILENAME}.$(whoami)"
 readonly VERMILION_FILE_LAST_SUCCESS=".vermilion_last_success"
 readonly VERMILION_CFLAGS="-march=native -O2 -pipe"
 readonly VERMILION_CXXFLAGS="-march=native -O3"
 readonly VERMILION_TARGET="$1"
 shift
+readonly BASIC_ACCESS_SED="s/^\\s*#.*//;/^\\s*\$/d"
+readonly TAG_POST_BEGIN="v^post^n"
+readonly TAG_POST_END="v\$post\$n"
+readonly TAG_POST_BEGIN_ESC="v\\^post\\^n"
+readonly TAG_POST_END_ESC="v\\\$post\\\$n"
+readonly TAG_DEP_BEGIN="v^dep^n"
+readonly TAG_DEP_END="v\$dep\$n"
+readonly TAG_DEP_BEGIN_ESC="v\\^dep\\^n"
+readonly TAG_DEP_END_ESC="v\\\$dep\\\$n"
+
 
 # Try using chroot-git then git from the host system
 if command -v chroot-git &>/dev/null; then
@@ -116,10 +127,10 @@ upgrade() {
 
     local POST_BUILD=()
 
-    if [[ "$1" == "post" ]]; then
+    if [[ "$1" == $TAG_POST_BEGIN ]]; then
         shift
         readonly local HOME_ESCAPED=$(echo "${HOME}" | sed "s:\\/:\\\\/:g")
-        while test $# -gt 0 && test "$1" != "postend"; do
+        while test $# -gt 0 && test "$1" != "$TAG_POST_END"; do
             POST_BUILD+=("$(echo "$1" | sed "s:^\\^\\/:${HOME_ESCAPED}\\/:")")
             shift
         done
@@ -183,7 +194,7 @@ run_depcheck() {
     while read -r line || [[ -n "$line" ]]; do
         echo -n "$line" | awk '{print "[", $1, "] requires:"}'
 
-        for dependency in $(echo -n "$line" | sed "s/^.* dep \(.\+\) depend.*\$/\\1/"); do
+        for dependency in $(echo -n "$line" | sed "s/^.* $TAG_DEP_BEGIN_ESC \(.\+\) ${TAG_DEP_END_ESC}.*\$/\\1/"); do
             echo -n " > $dependency, "
             local FOUND=$(echo "$AVAILABLE_LIBS" | grep "$dependency")
             if test -n "$FOUND"; then
@@ -218,15 +229,23 @@ add_dependency() {
 
 func_main() {
     echo "Running [$1]..."
-    while read -r line || [[ -n "$line" ]]
+    local OUTPUTS=()
+    local index=0
+
+    while read -r line || [[ -n $line ]]
     do
-        # fork in order to keep our pipes clean
-        "$1" ${line} &
-        wait
+        echo "${line}" | awk "{print \$1}"
+        OUTPUTS[$index]="$("$1" ${line} 2>&1)"
+        let index++
+    done
+    wait
+
+    for output in $OUTPUTS
+    do
+        [[ -n $output ]] && \
+            echo "$output"
     done
 }
-
-readonly BASIC_ACCESS_SED="s/^\\s*#.*//;/^\\s*\$/d"
 
 case "$VERMILION_TARGET" in
     help)
@@ -244,7 +263,7 @@ case "$VERMILION_TARGET" in
         test -f $VERMILION_FILE_LAST_SUCCESS && rm $VERMILION_FILE_LAST_SUCCESS
         ;;
     check)
-        sed "${BASIC_ACCESS_SED};/ dep /!d" "$VERMILION_FILE_LIST" | run_depcheck
+        sed "${BASIC_ACCESS_SED};/ $TAG_DEP_BEGIN_ESC /!d" "$VERMILION_FILE_LIST" | run_depcheck
         ;;
     dep)
         sed "$BASIC_ACCESS_SED;/^$(get_dir_current | sed "s/[]\/\$*.^[]/\\\&/g")/d" \
@@ -260,16 +279,16 @@ case "$VERMILION_TARGET" in
         sed "$BASIC_ACCESS_SED;/^${ESCAPED_NAME}/d" \
             "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
         cp "$VERMILION_FILE_LIST" "${VERMILION_FILE_LIST_TMP}2"
-        echo "post" "$@" "postend" | \
-            add_after_origin $(sed "$BASIC_ACCESS_SED;s/ post .* postend / /;/^${ESCAPED_NAME}/!d" "${VERMILION_FILE_LIST_TMP}2") | \
+        echo "$TAG_POST_BEGIN" "$@" "$TAG_POST_END" | \
+            add_after_origin $(sed "$BASIC_ACCESS_SED;s/ $TAG_POST_BEGIN_ESC .* $TAG_POST_END_ESC / /;/^${ESCAPED_NAME}/!d" "${VERMILION_FILE_LIST_TMP}2") | \
             cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
         rm "$VERMILION_FILE_LIST_TMP" "${VERMILION_FILE_LIST_TMP}2"
         ;;
     up*)
-        sed "$BASIC_ACCESS_SED;s/ dep .* depend / /" "$VERMILION_FILE_LIST" | func_main upgrade
+        sed "$BASIC_ACCESS_SED;s/ $TAG_DEP_BEGIN_ESC .* $TAG_DEP_END_ESC / /" "$VERMILION_FILE_LIST" | func_main upgrade
         ;;
     prep*)
-        sed "$BASIC_ACCESS_SED;s/ dep .* depend / /" "$VERMILION_FILE_LIST" | func_main prepare
+        sed "$BASIC_ACCESS_SED;s/ $TAG_DEP_BEGIN_ESC .* $TAG_DEP_END_ESC / /" "$VERMILION_FILE_LIST" | func_main prepare
         ;;
     st*)
         sed "$BASIC_ACCESS_SED;s/^\([^ ]\+\).*/\\1/" "$VERMILION_FILE_LIST"
