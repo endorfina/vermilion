@@ -4,28 +4,30 @@ readonly PROGNAME="${0##*/}"
 
 usage() {
     cat << _EOF
-$PROGNAME <cmd> [OPTIONS] ...
+ \$ $PROGNAME command ...
 
 Available commands:
-    add examples:
-        $PROGNAME add git - will keep a repo up to date and nothing else.
-        $PROGNAME add cmake - will run cmake and build upon new git pull.
-        $PROGNAME add make target all - will run make upon new git pull.
+    add [type] [...]
+        Available types:
+            run [bash commands...]
+
+            make [options...]
+
+            cmake [options...]
 
     mark:
         Marks the current repo for a rebuild upon a subsequent upgrade call.
 
     post, postbuild:
         Will run specified commands upon successful git pull AND build.
-        ex. $PROGNAME postbuild cp a.out ^/.local/bin/
-        Note: ^/ is equivalent to \$HOME. It helps with portability.
+        ex. $PROGNAME postbuild cp a.out ^/.local/bin/my_program
+        Note: ^/ is automatically translated to \$HOME.
 
     up, upgrade:
         Runs git fetch on everything and builds if new.
 
     prep, prepare:
         Checks if all repos actually exist and runs git clone if one doesn't.
-        The parent directory must still be present.
 
 Feel free to ask and/or contribute on github! :)
 https://github.com/endorfina/vermilion
@@ -33,232 +35,489 @@ https://github.com/endorfina/vermilion
 _EOF
 }
 
-test $# -eq 0 && usage && exit 1
+[[ $# -eq 0 ]] && usage && exit 1
 
-readonly VERMILION_FILE_LIST_FILENAME="vermilion_record"
-readonly VERMILION_FILE_LIST="${HOME}/.config/$VERMILION_FILE_LIST_FILENAME"
-readonly VERMILION_FILE_LIST_TMP="/tmp/${VERMILION_FILE_LIST_FILENAME}.$(whoami)"
-readonly VERMILION_FILE_LAST_SUCCESS=".vermilion_last_success"
-readonly VERMILION_CFLAGS="-march=native -O2 -pipe"
-readonly VERMILION_CXXFLAGS="-march=native -O3"
-readonly VERMILION_TARGET="$1"
+vermilion_defines()
+{
+    readonly VERM_FILE_LIST_FILENAME='vermilion_record'
+    readonly VERM_FILE_LIST=${HOME}/.config/${VERM_FILE_LIST_FILENAME}
+    readonly VERM_FILE_LAST_SUCCESS='.vermilion_last_success'
+    readonly VERM_CFLAGS='-march=native -mtune=native -O2 -pipe'
+    readonly VERM_CXXFLAGS='-march=native -mtune=native -O3'
+    readonly VERM_UNIVERSAL_DELIMITER=':#GLUE#:'
+}
+
+readonly VERM_TARGET="$1"
 shift
-readonly BASIC_ACCESS_SED="s/^\\s*#.*//;/^\\s*\$/d"
-readonly TAG_POST_BEGIN="v^post^n"
-readonly TAG_POST_END="v\$post\$n"
-readonly TAG_POST_BEGIN_ESC="v\\^post\\^n"
-readonly TAG_POST_END_ESC="v\\\$post\\\$n"
-readonly TAG_DEP_BEGIN="v^dep^n"
-readonly TAG_DEP_END="v\$dep\$n"
-readonly TAG_DEP_BEGIN_ESC="v\\^dep\\^n"
-readonly TAG_DEP_END_ESC="v\\\$dep\\\$n"
 
+die()
+{
+    echo "$@"
+    exit 1
+}
 
 # Try using chroot-git then git from the host system
-if command -v chroot-git &>/dev/null; then
-	VERMILION_GIT_CMD=$(command -v chroot-git)
-elif command -v git &>/dev/null; then
-	VERMILION_GIT_CMD=$(command -v git)
-else
-    echo "neither chroot-git or git are available in your system!"
-    exit 1
-fi
+VERM_GIT_CMD=$(command -v chroot-git)
+[[ $? -ne 0 ]] && VERM_GIT_CMD=$(command -v git)
 
-readonly VERMILION_GIT_CMD
+[[ $? -ne 0 ]] && die 'Neither chroot-git nor git are available on your system!'
+readonly VERM_GIT_CMD
 
-get_dir() {
-    readonly local RE="^\^/(.+)"
-    local escaped=$(echo "$1" | sed "s/%SPACE%/ /g")
-    [[ "$escaped" =~ $RE ]] && \
-        echo -n "${HOME}/${BASH_REMATCH[1]}" || \
-        echo -n "$escaped"
+parse_record()
+{
+    if [[ $1 =~ \[@dir\]:(\^/)?(.+):\[repo\]:(.+):\[verm\]:(.*):\[meta\]:(.*):\[lion\] ]]
+    then
+        VERM_RET_DIR=${BASH_REMATCH[2]}
+        [[ -n ${BASH_REMATCH[1]} ]] && VERM_RET_DIR=$HOME/$VERM_RET_DIR
+        VERM_RET_ORIGIN=${BASH_REMATCH[3]}
+        VERM_RET_CMD_RAW=${BASH_REMATCH[4]}
+        VERM_RET_META_RAW=${BASH_REMATCH[5]}
+    else
+        die 'Failed to parse:' "${1}"
+    fi
 }
 
-get_dir_current() {
-    local readonly RE="^(${HOME})/(.+)"
-    local FILENAME=$(pwd | sed "s/ /%SPACE%/g")
-    [[ "$FILENAME" =~ $RE ]] && \
-        echo "^/${BASH_REMATCH[2]}" || \
-        echo "$FILENAME"
+
+parse_meta()
+{
+    VERM_RET_CMD=()
+    VERM_RET_META=()
+
+    [[ -n $VERM_RET_CMD_RAW ]] && while read -r
+    do
+        if [[ $REPLY == '^/'* ]]
+        then
+            VERM_RET_CMD+=("${HOME}${REPLY#'^'}")
+        else
+            VERM_RET_CMD+=("$REPLY")
+        fi
+    done <<< "${VERM_RET_CMD_RAW//"${VERM_UNIVERSAL_DELIMITER}"/$'\n'}"
+
+    local intermediate_meta=()
+    [[ -n $VERM_RET_META_RAW ]] && while read -r
+    do
+        if [[ $REPLY == '^/'* ]]
+        then
+            intermediate_meta+=("${HOME}${REPLY#'^'}")
+        else
+            intermediate_meta+=("$REPLY")
+        fi
+    done <<< "${VERM_RET_META_RAW//"${VERM_UNIVERSAL_DELIMITER}"/$'\n'}"
+
+    set -- "${intermediate_meta[@]}"
+
+    while [[ $# -gt 0 ]]
+    do
+        local node_label=$1
+        local node_content=''
+        shift
+
+        while [[ $# -gt 0 && ! $1 == "/${node_label}" ]]
+        do
+            node_content+=$VERM_UNIVERSAL_DELIMITER$1
+            shift
+        done
+        shift
+        VERM_RET_META+=($node_label$node_content)
+    done
 }
 
-prepare() {
-    local DIR=$(get_dir "$1")
-    local BASENAME=$(basename $DIR)
-    local ORIGIN="$2"
+get_directory_info()
+{
+    [[ -z $VERM_RET_RECORD_SOURCE ]] || die
+    local working_directory
+    working_directory=$(pwd)
 
-    if test ! -d $DIR && cd $(dirname "$DIR"); then
-        $VERMILION_GIT_CMD clone --recurse-submodules $ORIGIN $BASENAME &>/dev/null && \
-        echo "Fetching $BASENAME: complete"
+    while [[ -n $working_directory && ! -d "$working_directory/.git" ]]
+    do
+        working_directory=$(dirname "$working_directory")
+        working_directory=${working_directory%/}
+    done
+
+    [[ -z $working_directory || ! -d "$working_directory/.git" ]] && die "Can't find .git directory anywhere in $(pwd)!"
+
+    if [[ $working_directory == "${HOME}/"* ]]
+    then
+        working_directory='^'${working_directory#"$HOME"}
+    fi
+    VERM_RET_RECORD_SOURCE=${working_directory}
+    readonly VERM_RET_RECORD_SOURCE
+}
+
+generate_record_prefix()
+{
+    get_directory_info
+    local git_origin
+    git_origin=$("$VERM_GIT_CMD" config --get remote.origin.url)
+    VERM_RET_RECORD='[@dir]:'${VERM_RET_RECORD_SOURCE}':[repo]:'$git_origin':[verm]:'
+
+    echo 'Generated a record for' "$VERM_RET_RECORD_SOURCE"
+    echo 'Origin at:' "$git_origin"
+}
+
+attach_to_record()
+{
+    [[ $# -lt 2 ]] && return 0
+    local delim=$1
+    VERM_RET_RECORD+=$2
+    shift 2
+
+    while [[ $# -gt 0 ]]
+    do
+        VERM_RET_RECORD+=${delim}${1}
+        shift
+    done
+}
+
+vermilion_prepare()
+{
+    local directory_name=$(basename "$VERM_RET_DIR")
+    local parent_directory=$(dirname "$VERM_RET_DIR")
+
+    [[ -z $directory_name || -z $parent_directory ]] && die
+
+    mkdir -p "$parent_directory"
+    cd "$parent_directory" || die
+
+    if [[ ! -d $directory_name ]]
+    then
+        "$VERM_GIT_CMD" clone --recurse-submodules "$VERM_RET_ORIGIN" "$directory_name" &>/dev/null \
+            && echo "Fetching $directory_name complete" \
+            && cd "$directory_name" \
+            && return 0
+        die "Failed to clone $VERM_RET_ORIGIN"
+    fi
+}
+
+vermilion_insert()
+{
+    local found=false
+    local tmp_list_file
+    tmp_list_file=$(mktemp)
+
+    while read -r line || [[ -n $line ]]
+    do
+        parse_record "${line}"
+
+        if [[ ${VERM_RET_DIR} == "$VERM_RET_RECORD_SOURCE" ]]
+        then
+            [[ $found == true ]] && die "${VERM_RET_RECORD_SOURCE} defined twice!"
+            found=true
+
+            [[ $1 =~ ^(.+):\[meta\]: ]] || die "Failed to parse $1"
+            echo "${BASH_REMATCH[1]}:[meta]:${VERM_RET_META_RAW}:[lion]" >> "${tmp_list_file}"
+        else
+            echo "${line}" >> "${tmp_list_file}"
+        fi
+    done
+
+    [[ ! $found == true ]] && echo "$1" >> "${tmp_list_file}"
+
+    mv -fv "$tmp_list_file" "$VERM_FILE_LIST"
+}
+
+set_postbuild()
+{
+    parse_meta
+    VERM_RET_RECORD="[@dir]:${VERM_RET_RECORD_SOURCE}:[repo]:${VERM_RET_ORIGIN}:[verm]:${VERM_RET_CMD_RAW}:[meta]:"
+    attach_to_record "$VERM_UNIVERSAL_DELIMITER" 'postb' "$@" '/postb'
+    attach_to_record '' ':[lion]'
+    echo "$VERM_RET_RECORD"
+}
+
+vermilion_modify()
+{
+    local found=false
+    local tmp_list_file
+    tmp_list_file=$(mktemp)
+    get_directory_info
+
+    [[ $# -gt 0 ]] || die
+
+    while read -r line || [[ -n $line ]]
+    do
+        parse_record "${line}"
+
+        if [[ ${VERM_RET_DIR} == "$VERM_RET_RECORD_SOURCE" ]]
+        then
+            [[ $found == true ]] && die "${VERM_RET_RECORD_SOURCE} defined twice!"
+            found=true
+
+            record="$line" \
+            "$@" >> "${tmp_list_file}"
+            echo "Modified record at \"$VERM_RET_RECORD_SOURCE\""
+        else
+            echo "${line}" >> "${tmp_list_file}"
+        fi
+    done
+
+    if [[ ! $found == true ]]
+    then
+        rm "$tmp_list_file"
+        die "Couldn't find any $PROGNAME controlled repo in current directory."
     fi
 
-    cd $DIR || (echo "Can't build $DIR" 1>&2; exit 1)
+    mv -fv "$tmp_list_file" "$VERM_FILE_LIST"
 }
 
-run_make() {
-    local MAK_TARGET=
-    while test $# -gt 0; do
+run_make()
+{
+    local ARGS=()
+    local MAK_TARGET
+    while [[ $# -gt 0 ]]; do
         local VERCMD="$1"
         shift
         case "$VERCMD" in
             cxxflags)
-                export "$1"="$VERMILION_CXXFLAGS"
+                export "$1=$VERM_CXXFLAGS"
                 shift
                 ;;
             cflags)
-                export "$1"="$VERMILION_CFLAGS"
+                export "$1=$VERM_CFLAGS"
                 shift
                 ;;
             target)
-                MAK_TARGET="$1"
+                MAK_TARGET=$1
+                shift
+                ;;
+            jobs)
+                ARGS+=(-j "$1")
                 shift
                 ;;
         esac
     done
-    test -n "$MAK_TARGET" && \
-        make "$MAK_TARGET" || \
-        make
+
+    [[ -n $MAK_TARGET ]] && ARGS+=("$MAK_TARGET")
+    make "${ARGS[@]}"
 }
 
-upgrade() {
-    readonly local DIR=$(get_dir "$1")
-    readonly local ORIGIN="$2"
-    shift 2
-
-    local POST_BUILD=()
-
-    if [[ "$1" == $TAG_POST_BEGIN ]]; then
-        shift
-        readonly local HOME_ESCAPED=$(echo "${HOME}" | sed "s:\\/:\\\\/:g")
-        while test $# -gt 0 && test "$1" != "$TAG_POST_END"; do
-            POST_BUILD+=("$(echo "$1" | sed "s:^\\^\\/:${HOME_ESCAPED}\\/:")")
-            shift
-        done
-        shift
-    fi
-
-    local VERCMD="$1"
+run_cmake()
+{
+    local build_dir='.vermilion_cmake_build_files'
+    local source_dir=$1
     shift
 
-    cd $DIR || (echo "Can't find $DIR" 1>&2; exit 1)
-    if test -d .git && $VERMILION_GIT_CMD fetch &> /dev/null; then
-        $VERMILION_GIT_CMD pull -q
+    if [[ $source_dir == '.' ]]
+    then
+        source_dir=..
     else
-        echo "Cannot git fetch $DIR"
-        exit 1
+        source_dir=../$source_dir
     fi
-    local HEAD_POS=$($VERMILION_GIT_CMD rev-parse HEAD)
-    test -f "$VERMILION_FILE_LAST_SUCCESS" && [[ "$(cat "$VERMILION_FILE_LAST_SUCCESS")" == "$HEAD_POS" ]] && exit 0
 
-    case "$VERCMD" in
-        script)
-            if test $# -gt 0
-            then
-                "$@"
-            fi
-            ;;
-        cmake)
-            local BUILD_DIR=".vermilion_cmake_build_files"
-            local SRC_DIR="$1"
+    mkdir -p "$build_dir"
+    cd "$build_dir" || exit 1
+
+    if [[ ! -f "${build_dir}/CMakeCache.txt" ]]
+    then
+        cd "$build_dir" || exit 1
+
+        if ! cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$VERM_CFLAGS" -DCMAKE_CXX_FLAGS="$VERM_CXXFLAGS" "$@" "$source_dir"
+        then
+             rm -rf ./* &>/dev/null
+             exit 1
+        fi
+
+        cd .. || exit 1
+    fi
+
+    cmake --build "${build_dir}"
+}
+
+present_list()
+{
+    [[ $# -lt 2 ]] && return 0
+    local delim=$1
+    echo -n "\"$2\""
+    shift 2
+
+    while [[ $# -gt 0 ]]
+    do
+        echo -n "${delim}\"${1}\""
+        shift
+    done
+}
+
+vermilion_status()
+{
+    echo "   Origin: $VERM_RET_ORIGIN"
+
+    parse_meta
+
+    set -- "${VERM_RET_CMD[@]}"
+    local vermilion_command=${1:-run}
+    shift
+
+    echo -n "   Command: $vermilion_command"
+
+    if [[ $# -gt 0 ]]
+    then
+        echo -n ' [ '
+        present_list ', ' "$@"
+        echo ' ]'
+    else
+        echo
+    fi
+
+    if [[ ${#VERM_RET_META[*]} -gt 0 ]]
+    then
+        echo '   Other options:'
+        for meta_opt in "${VERM_RET_META[@]}"
+        do
+            local table_content=()
+            while read -r; do
+                table_content+=("$REPLY")
+            done <<< "${meta_opt//"$VERM_UNIVERSAL_DELIMITER"/$'\n'}"
+
+            set -- "${table_content[@]}"
+            local node_label=$1
             shift
-            if test ! -f "${BUILD_DIR}/CMakeCache.txt"; then
-                cmake -B "${BUILD_DIR}" -S "${SRC_DIR}" -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS="$VERMILION_CFLAGS" -DCMAKE_CXX_FLAGS="$VERMILION_CXXFLAGS" || (rm -rf "${BUILD_DIR}"; exit 1)
-            fi
-            cmake --build "${BUILD_DIR}" "$@"
+
+            echo -n "     - $node_label {"
+            for word in "$@"
+            do
+                echo -n " \"$word\""
+            done
+            echo ' }'
+        done
+    fi
+}
+
+vermilion_upgrade()
+{
+    local directory_name=$(basename "$VERM_RET_DIR")
+    local parent_directory=$(dirname "$VERM_RET_DIR")
+    local TAG
+
+    if ! cd "$VERM_RET_DIR"
+    then
+        echo " - \"$VERM_RET_DIR\" doesn't exist. Please run:"$'\n\t$' "$PROGNAME prepare"
+        return 0
+    fi
+
+    parse_meta
+
+    set -- "${VERM_RET_CMD[@]}"
+    local vermilion_command=${1:-run}
+    shift
+
+    if [[ -d .git ]] && "$VERM_GIT_CMD" fetch &>/dev/null
+    then
+        if ! "$VERM_GIT_CMD" pull -qr --recurse-submodules
+        then
+            echo " [$directory_name] Version control error: Pull unsuccessful"
+            "$VERM_GIT_CMD" status
+        fi
+    else
+        die " [${directory_name}] Network error: Cannot git fetch $VERM_RET_DIR"
+    fi
+    local git_head_position
+    git_head_position=$("$VERM_GIT_CMD" rev-parse HEAD)
+
+    if [[ -r "$VERM_FILE_LAST_SUCCESS" && $(cat "$VERM_FILE_LAST_SUCCESS") == "$git_head_position" ]]
+    then
+        echo " [${directory_name}] No work to do."
+        return 0
+    fi
+
+    case "$vermilion_command" in
+        run)
+            [[ $# -eq 0 ]] || "$@"
             ;;
+
+        cmake)
+            run_cmake "$@"
+            ;;
+
         make)
             run_make "$@"
             ;;
-        git)
-            exit 0 # do nothing, only fetch updates
-            ;;
+
         *)
-            echo "[${DIR}] unknown option ${CMD}"
-            exit 1
+            die " [${directory_name}] Configuration error: unknown option \"${vermilion_command}\""
             ;;
     esac
 
-    if test $? -eq 0
+    if [[ $? -eq 0 ]]
     then
-        if test "${#POST_BUILD[@]}" -gt 0; then
-            echo "${POST_BUILD[*]}" | bash
+        if [[ ${#POST_BUILD[@]} -eq 0 ]] || "${POST_BUILD[@]}"
+        then
+            echo -n "$git_head_position" > "$VERM_FILE_LAST_SUCCESS"
+            echo " [${directory_name}] Recorded success at HEAD $git_head_position"
+        else
+            echo " [${directory_name}] Warning: Post-build command \"${POST_BUILD[*]}\" failed. Will attempt to build again on next $PROGNAME up"
         fi
-        echo -n "$HEAD_POS" > $VERMILION_FILE_LAST_SUCCESS
     else
-        echo "[${DIR}] failed to upgrade."
+        echo " [${directory_name}] Fatal: failed to upgrade."
+        return 1
     fi
 }
 
-add_after_origin() {
-    if test $# -gt 0
-    then
-        local DIR="$1"
-        local ORIGIN="$2"
-        shift 2
-        echo "$DIR" "$ORIGIN" "$(cat)" "$@"
-    fi
-}
-
-func_main() {
-    echo "Running [$1]..."
-    local OUTPUTS=()
-    local index=0
+vermilion_loop()
+{
+    [[ $# -lt 1 ]] && exit 1
+    local line
+    echo "Running [${1#vermilion_}]..."
 
     while read -r line || [[ -n $line ]]
     do
-        echo "${line}" | awk "{print \$1}"
-        OUTPUTS[$index]="$("$1" ${line} 2>&1)"
-        let index++
-    done
-    wait
-
-    for output in "${OUTPUTS[@]}"
-    do
-        [[ -n $output ]] && \
-            echo "$output"
+        parse_record "${line}"
+        echo " >> ${VERM_RET_DIR} <<"
+        "$@"
     done
 }
 
-case "$VERMILION_TARGET" in
+vermilion_pass()
+{
+    [[ $# -lt 1 ]] && exit 1
+    local vermilion_program=$1
+    shift
+    [[ $vermilion_program == vermilion_* ]] || vermilion_program=vermilion_$vermilion_program
+    [[ -r $VERM_FILE_LIST ]] && vermilion_loop "$vermilion_program" "$@" < "$VERM_FILE_LIST"
+}
+
+vermilion_defines
+
+case "$VERM_TARGET" in
     help)
         usage && exit 0
         ;;
-    add)
-        CURRENT_DIR=$(get_dir_current)
-        sed "/^$(echo "$CURRENT_DIR" | sed "s/[]\/\$*.^[]/\\\&/g")/d" \
-            "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
-        echo "$CURRENT_DIR" "$($VERMILION_GIT_CMD config --get remote.origin.url)" "$@" | \
-            cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
-        rm "$VERMILION_FILE_LIST_TMP"
-        ;;
-    mark)
-        test -f $VERMILION_FILE_LAST_SUCCESS && rm $VERMILION_FILE_LAST_SUCCESS
-        ;;
-    post|postbuild)
-        CURRENT_DIR=$(get_dir_current)
-        ESCAPED_NAME=$(echo "$CURRENT_DIR" | sed "s/[]\/\$*.^[]/\\\&/g")
 
-        sed "$BASIC_ACCESS_SED;/^${ESCAPED_NAME}/d" \
-            "$VERMILION_FILE_LIST" > "$VERMILION_FILE_LIST_TMP"
-        cp "$VERMILION_FILE_LIST" "${VERMILION_FILE_LIST_TMP}2"
-        echo "$TAG_POST_BEGIN" "$@" "$TAG_POST_END" | \
-            add_after_origin $(sed "$BASIC_ACCESS_SED;s/ $TAG_POST_BEGIN_ESC .* $TAG_POST_END_ESC / /;/^${ESCAPED_NAME}/!d" "${VERMILION_FILE_LIST_TMP}2") | \
-            cat - "$VERMILION_FILE_LIST_TMP" 2>/dev/null > $VERMILION_FILE_LIST
-        rm "$VERMILION_FILE_LIST_TMP" "${VERMILION_FILE_LIST_TMP}2"
+    add)
+        generate_record_prefix
+        attach_to_record "$VERM_UNIVERSAL_DELIMITER" "$@"
+        attach_to_record '' ':[meta]::[lion]'
+
+        if [[ -r $VERM_FILE_LIST ]]
+        then
+            vermilion_insert "${VERM_RET_RECORD}" < "$VERM_FILE_LIST"
+        else
+            echo "${VERM_RET_RECORD}" > "$VERM_FILE_LIST"
+        fi
         ;;
+
+    mark)
+        [[ -f $VERM_FILE_LAST_SUCCESS ]] && rm "$VERM_FILE_LAST_SUCCESS"
+        ;;
+
+    post|postbuild)
+        [[ -r $VERM_FILE_LIST ]] && \
+            vermilion_modify set_postbuild "$@" < "$VERM_FILE_LIST"
+        ;;
+
     up|upgrade|update)
-        sed "$BASIC_ACCESS_SED;s/ $TAG_DEP_BEGIN_ESC .* $TAG_DEP_END_ESC / /" "$VERMILION_FILE_LIST" | func_main upgrade
+        vermilion_pass upgrade
         ;;
+
     prep|prepare)
-        sed "$BASIC_ACCESS_SED;s/ $TAG_DEP_BEGIN_ESC .* $TAG_DEP_END_ESC / /" "$VERMILION_FILE_LIST" | func_main prepare
+        vermilion_pass prepare
         ;;
+
     st|status)
-        sed "$BASIC_ACCESS_SED;s/^\([^ ]\+\).*/\\1/" "$VERMILION_FILE_LIST"
+        vermilion_pass status
         ;;
+
     *)
         usage && exit 1
         ;;
 esac
-
-exit 0
 

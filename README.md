@@ -8,10 +8,10 @@ Vermilion is a bash utility I wrote to keep my tarballs fresh forever (mostly du
 ### OK. It's simple
 
 ```bash
-$ git clone <url> <dir>
-$ cd <dir>
-$ vermilion add git
-$ vermilion upgrade
+git clone <url> <dir>
+cd <dir>
+vermilion add git
+vermilion upgrade
 ```
 
 vermilion keeps a record of stuff the user has added in `~/.config/vermilion_record`.
@@ -22,7 +22,7 @@ CMake builds automatically receive the `-march=native` flag, among others.
 GNU make builds can populate environment variables as of now and this has to be done manually:
 
 ```bash
-$ vermilion add make cflags CFLAGS cxxflags CXXFLAGS target all
+vermilion add make cflags CFLAGS cxxflags CXXFLAGS target all
 ```
 
 This will basically populate CFLAGS and CXXFLAGS with the same flags that cmake receives, then it will call `make all`.
