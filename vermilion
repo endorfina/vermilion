@@ -40,7 +40,7 @@ _EOF
 vermilion_defines()
 {
     readonly VERM_FILE_LIST_FILENAME='vermilion_record'
-    readonly VERM_FILE_LIST=${HOME}/.config/${VERM_FILE_LIST_FILENAME}
+    readonly VERM_FILE_LIST=${XDG_CONFIG_HOME:-"${HOME}/.config"}/${VERM_FILE_LIST_FILENAME}
     readonly VERM_FILE_LAST_SUCCESS='.vermilion_last_success'
     readonly VERM_CFLAGS='-march=native -mtune=native -O2 -pipe'
     readonly VERM_CXXFLAGS='-march=native -mtune=native -O3'
@@ -52,7 +52,7 @@ shift
 
 die()
 {
-    echo "$@"
+    echo 'dead:' "$@"
     exit 1
 }
 
@@ -386,7 +386,6 @@ vermilion_upgrade()
 {
     local directory_name=$(basename "$VERM_RET_DIR")
     local parent_directory=$(dirname "$VERM_RET_DIR")
-    local TAG
 
     if ! cd "$VERM_RET_DIR"
     then
